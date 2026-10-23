@@ -4,17 +4,37 @@ A FastAPI + PostGIS backend that ingests live coordinates from thousands of
 devices, streams them to web clients over WebSockets and raises alerts when a
 device enters / stays in / leaves a user's circular geozone.
 
+![Architecture](docs/architecture.svg)
+
+## Demo
+
+Leaflet UI with 10 000 simulated devices streaming in, a 1.5 km geozone around
+the city centre and the live alert feed (ENTER / EXIT, with the distance to the
+zone centre at the moment of the event):
+
+![Live map with devices and alerts](docs/screenshots/live-map.png)
+
+The same user opened on a phone-sized screen at the same time. Both sessions
+receive every alert; `GET /api/stats` confirms two connections for one user and
+no dropped frames while the generator is running:
+
+<img src="docs/screenshots/mobile-session.png" alt="Second session of the same user on a phone" width="320">
+
+```json
+{
+  "ingest":    { "received": 441500, "processed": 440750, "batches": 441,
+                 "alerts": 1819, "rejected": 0, "db_errors": 0,
+                 "queue_depth": 0, "queue_size": 100000,
+                 "last_batch_size": 500, "last_batch_ms": 34.6 },
+  "websocket": { "connections": 2, "users": 1,
+                 "dropped_location_batches": 0, "dropped_alert_batches": 0,
+                 "sent_messages": 1034 }
+}
 ```
-devices ──HTTP / WS──▶ bounded queue ──▶ micro-batch worker ──▶ PostGIS (history, last position, zone evaluation)
-                                                    │
-                                                    ▼
-                                         Redis pub/sub (or in-process)
-                                                    │
-                      ┌─────────────────────────────┴───────────────────────────┐
-                      ▼                                                         ▼
-            app process #1 ── WebSocket sessions                     app process #N ── WebSocket sessions
-            (laptop, phone … per user)                               (laptop, phone … per user)
-```
+
+Interactive API docs (Swagger UI) at `/docs`:
+
+![Swagger UI](docs/screenshots/swagger.png)
 
 ## Running
 
@@ -64,8 +84,18 @@ python generator.py --duration 60 --connections 50 -v    # run for a minute, mor
 The generator prints throughput and round-trip latency every 5 s:
 
 ```
-[12:00:05] sent=16750 (3,350 pts/s) batches=67 rtt p50=4ms p95=11ms errors=0 throttled=0 reconnects=0
+simulating 10000 devices over 20 ws connection(s) -> http://localhost:8080; interval=3.0s batch=250 (~3,333 points/s)
+[17:07:19] sent=15000 (2,998 pts/s) batches=60 rtt p50=3ms p95=18ms errors=0 throttled=0 reconnects=0
+[17:07:24] sent=31000 (3,198 pts/s) batches=124 rtt p50=3ms p95=29ms errors=0 throttled=0 reconnects=0
+[17:07:29] sent=47250 (3,246 pts/s) batches=189 rtt p50=5ms p95=17ms errors=0 throttled=0 reconnects=0
+...
+final: sent=196500 (3,363 pts/s) batches=786 rtt p50=5ms p95=28ms errors=0 throttled=0 reconnects=0
 ```
+
+Measured on a laptop (Docker Desktop, single uvicorn worker) with the default
+settings: ~3 300 points/s sustained, the ingestion queue stays empty, a batch of
+1 250 points takes ~130 ms in PostGIS, the app container uses ~8 % CPU and
+~80 MB RAM, PostGIS ~20 % CPU.
 
 `GET /api/stats` shows the server-side view: queue depth, batch size and
 latency of the last batch, alerts produced, WebSocket sessions and how many

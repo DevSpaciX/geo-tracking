@@ -35,6 +35,12 @@
   .hint { font-size:12px; color:var(--muted); }
   label.chk { display:flex; gap:6px; align-items:center; font-size:12px; color:var(--muted); }
   #alerts { max-height:38vh; overflow-y:auto; }
+  @media (max-width: 700px) {
+    body { grid-template-columns:1fr; grid-template-rows:auto 1fr; }
+    aside { max-height:46vh; order:2; }
+    #map { height:54vh; order:1; }
+    #alerts { max-height:20vh; }
+  }
 </style>
 </head>
 <body>
