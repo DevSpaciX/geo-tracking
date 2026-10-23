@@ -1,0 +1,227 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Geo-Tracking Live</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
+<style>
+  :root { --bg:#0f172a; --panel:#1e293b; --text:#e2e8f0; --muted:#94a3b8; --accent:#38bdf8; --ok:#4ade80; --warn:#fbbf24; --err:#f87171; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:14px/1.4 system-ui,-apple-system,Segoe UI,Roboto,sans-serif; background:var(--bg); color:var(--text); display:grid; grid-template-columns: 340px 1fr; height:100vh; }
+  aside { background:var(--panel); padding:14px; overflow-y:auto; display:flex; flex-direction:column; gap:12px; }
+  #map { height:100vh; }
+  h1 { font-size:16px; margin:0 0 4px; }
+  h2 { font-size:12px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); margin:8px 0 4px; }
+  input, button, select { font:inherit; }
+  input[type=text] { width:100%; padding:6px 8px; border-radius:6px; border:1px solid #334155; background:#0b1220; color:var(--text); }
+  button { padding:6px 10px; border-radius:6px; border:0; background:var(--accent); color:#0b1220; cursor:pointer; font-weight:600; }
+  button.secondary { background:#334155; color:var(--text); }
+  button.danger { background:var(--err); color:#0b1220; padding:2px 6px; font-size:12px; }
+  .row { display:flex; gap:6px; align-items:center; }
+  .status { font-size:12px; color:var(--muted); }
+  .dot { display:inline-block; width:8px; height:8px; border-radius:50%; background:var(--err); margin-right:6px; }
+  .dot.on { background:var(--ok); }
+  .stats { display:grid; grid-template-columns:1fr 1fr; gap:4px 10px; font-size:12px; }
+  .stats b { color:var(--text); font-weight:600; }
+  .stats span { color:var(--muted); }
+  ul { list-style:none; margin:0; padding:0; }
+  li { padding:6px 8px; border-radius:6px; background:#0b1220; margin-bottom:4px; font-size:12px; }
+  li .row { justify-content:space-between; }
+  .alert-enter { border-left:3px solid var(--ok); }
+  .alert-exit { border-left:3px solid var(--warn); }
+  .alert-inside { border-left:3px solid #64748b; }
+  .hint { font-size:12px; color:var(--muted); }
+  label.chk { display:flex; gap:6px; align-items:center; font-size:12px; color:var(--muted); }
+  #alerts { max-height:38vh; overflow-y:auto; }
+</style>
+</head>
+<body>
+<aside>
+  <div>
+    <h1>Geo-Tracking Live</h1>
+    <div class="status"><span class="dot" id="dot"></span><span id="status">disconnected</span></div>
+  </div>
+
+  <div>
+    <h2>Session</h2>
+    <div class="row">
+      <input type="text" id="userId" placeholder="user id (e.g. alice)" value="alice">
+      <button id="connectBtn">Connect</button>
+    </div>
+    <p class="hint">Open this page in a second tab with the same user id to see alerts delivered to every session.</p>
+    <label class="chk"><input type="checkbox" id="viewportOnly" checked> Stream only devices inside the viewport</label>
+    <label class="chk"><input type="checkbox" id="showInside"> Show repeated "inside" alerts</label>
+  </div>
+
+  <div>
+    <h2>Stats</h2>
+    <div class="stats">
+      <span>devices on map</span><b id="sDevices">0</b>
+      <span>position msgs/s</span><b id="sRate">0</b>
+      <span>positions/s</span><b id="sPoints">0</b>
+      <span>alerts received</span><b id="sAlerts">0</b>
+    </div>
+  </div>
+
+  <div>
+    <h2>Geozones <span class="hint">(click the map to add)</span></h2>
+    <ul id="zones"></ul>
+  </div>
+
+  <div>
+    <h2>Alerts</h2>
+    <ul id="alerts"></ul>
+  </div>
+</aside>
+<div id="map"></div>
+
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  const state = { ws: null, userId: null, zones: new Map(), markers: new Map(), alertCount: 0, msgWindow: [], ptsWindow: [] };
+
+  const map = L.map('map', { preferCanvas: true }).setView([50.4501, 30.5234], 12);
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '&copy; OpenStreetMap' }).addTo(map);
+  const deviceLayer = L.layerGroup().addTo(map);
+  const zoneLayer = L.layerGroup().addTo(map);
+
+  const headers = () => ({ 'Content-Type': 'application/json', 'X-User-Id': state.userId });
+  const setStatus = (text, on) => { $('status').textContent = text; $('dot').classList.toggle('on', !!on); };
+
+  // ---------------------------------------------------------------- zones
+  async function loadZones() {
+    const res = await fetch('/api/geozones', { headers: headers() });
+    if (!res.ok) return;
+    state.zones.clear();
+    (await res.json()).forEach(z => state.zones.set(z.id, z));
+    renderZones();
+  }
+  function renderZones() {
+    zoneLayer.clearLayers();
+    const ul = $('zones'); ul.innerHTML = '';
+    for (const z of state.zones.values()) {
+      const circle = L.circle([z.latitude, z.longitude], { radius: z.radius_m, color: z.is_active ? '#38bdf8' : '#64748b', weight: 2, fillOpacity: 0.08 });
+      circle.bindTooltip(`${z.name} (${Math.round(z.radius_m)} m)`);
+      zoneLayer.addLayer(circle);
+      z._circle = circle;
+      const li = document.createElement('li');
+      li.innerHTML = `<div class="row"><span><b>${esc(z.name)}</b> · ${Math.round(z.radius_m)} m${z.is_active ? '' : ' · inactive'}</span>
+        <span class="row"><button class="secondary" data-toggle="${z.id}" style="padding:2px 6px;font-size:12px">${z.is_active ? 'pause' : 'resume'}</button>
+        <button class="danger" data-del="${z.id}">✕</button></span></div>`;
+      ul.appendChild(li);
+    }
+  }
+  $('zones').addEventListener('click', async e => {
+    const del = e.target.dataset.del, tog = e.target.dataset.toggle;
+    if (del) { await fetch(`/api/geozones/${del}`, { method: 'DELETE', headers: headers() }); await loadZones(); }
+    if (tog) {
+      const z = state.zones.get(tog);
+      await fetch(`/api/geozones/${tog}`, { method: 'PATCH', headers: headers(), body: JSON.stringify({ is_active: !z.is_active }) });
+      await loadZones();
+    }
+  });
+  map.on('click', async e => {
+    if (!state.userId) { alert('Connect first'); return; }
+    const name = prompt('Zone name', `Zone ${state.zones.size + 1}`); if (name === null) return;
+    const radius = parseFloat(prompt('Radius in metres', '500')); if (!(radius > 0)) return;
+    const res = await fetch('/api/geozones', { method: 'POST', headers: headers(), body: JSON.stringify({ name, latitude: e.latlng.lat, longitude: e.latlng.lng, radius_m: radius }) });
+    if (!res.ok) alert('Failed: ' + (await res.text()));
+    await loadZones();
+  });
+
+  // ---------------------------------------------------------------- devices
+  function upsertDevice(d, lat, lon) {
+    let m = state.markers.get(d);
+    if (!m) {
+      m = L.circleMarker([lat, lon], { radius: 3, color: '#f8fafc', weight: 1, fillColor: '#38bdf8', fillOpacity: 0.9 });
+      m.bindTooltip(d);
+      m.addTo(deviceLayer);
+      state.markers.set(d, m);
+    } else {
+      m.setLatLng([lat, lon]);
+    }
+    return m;
+  }
+  async function loadDevices() {
+    const b = map.getBounds();
+    const res = await fetch(`/api/devices?limit=20000&bbox=${b.getWest()},${b.getSouth()},${b.getEast()},${b.getNorth()}`, { headers: headers() });
+    if (!res.ok) return;
+    (await res.json()).forEach(d => upsertDevice(d.device_id, d.latitude, d.longitude));
+    $('sDevices').textContent = state.markers.size;
+  }
+  function flash(deviceId, color) {
+    const m = state.markers.get(deviceId); if (!m) return;
+    m.setStyle({ fillColor: color, radius: 6 });
+    setTimeout(() => m.setStyle({ fillColor: '#38bdf8', radius: 3 }), 2500);
+  }
+
+  // ---------------------------------------------------------------- websocket
+  function sendViewport() {
+    if (!state.ws || state.ws.readyState !== 1) return;
+    if ($('viewportOnly').checked) {
+      const b = map.getBounds();
+      state.ws.send(JSON.stringify({ type: 'set_viewport', bbox: [b.getWest(), b.getSouth(), b.getEast(), b.getNorth()] }));
+    } else {
+      state.ws.send(JSON.stringify({ type: 'clear_viewport' }));
+    }
+  }
+  map.on('moveend', () => { sendViewport(); if (state.userId) loadDevices(); });
+  $('viewportOnly').addEventListener('change', sendViewport);
+
+  function connect() {
+    const userId = $('userId').value.trim();
+    if (!userId) return;
+    if (state.ws) { state.ws.onclose = null; state.ws.close(); }
+    state.userId = userId;
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+    const ws = new WebSocket(`${proto}://${location.host}/ws/live?user_id=${encodeURIComponent(userId)}`);
+    state.ws = ws;
+    setStatus('connecting…', false);
+    ws.onopen = () => { setStatus(`connected as ${userId}`, true); sendViewport(); loadZones(); loadDevices(); };
+    ws.onclose = () => { setStatus('disconnected – reconnecting in 2s', false); setTimeout(() => { if (state.ws === ws) connect(); }, 2000); };
+    ws.onmessage = ev => {
+      const msg = JSON.parse(ev.data);
+      if (msg.type === 'locations') {
+        const now = performance.now();
+        state.msgWindow.push(now); state.ptsWindow.push([now, msg.items.length]);
+        for (const it of msg.items) upsertDevice(it.device_id, it.lat, it.lon);
+        $('sDevices').textContent = state.markers.size;
+      } else if (msg.type === 'alerts') {
+        for (const a of msg.items) handleAlert(a);
+      } else if (msg.type === 'hello') {
+        setStatus(`connected as ${msg.user_id} · session ${msg.session_id.slice(0, 8)}`, true);
+      }
+    };
+  }
+  $('connectBtn').addEventListener('click', connect);
+  $('userId').addEventListener('keydown', e => { if (e.key === 'Enter') connect(); });
+
+  function handleAlert(a) {
+    state.alertCount++; $('sAlerts').textContent = state.alertCount;
+    if (a.event === 'enter') flash(a.device_id, '#4ade80');
+    if (a.event === 'exit') flash(a.device_id, '#fbbf24');
+    if (a.event === 'inside' && !$('showInside').checked) return;
+    const z = state.zones.get(a.zone_id);
+    if (z && z._circle && a.event !== 'inside') { z._circle.setStyle({ fillOpacity: 0.35 }); setTimeout(() => z._circle.setStyle({ fillOpacity: 0.08 }), 800); }
+    const li = document.createElement('li');
+    li.className = `alert-${a.event}`;
+    li.innerHTML = `<b>${a.event.toUpperCase()}</b> ${esc(a.device_id)} · ${esc(a.zone_name)} · ${a.distance_m} m · ${new Date(a.ts).toLocaleTimeString()}`;
+    const ul = $('alerts'); ul.prepend(li);
+    while (ul.children.length > 100) ul.removeChild(ul.lastChild);
+  }
+
+  setInterval(() => {
+    const cutoff = performance.now() - 5000;
+    state.msgWindow = state.msgWindow.filter(t => t > cutoff);
+    state.ptsWindow = state.ptsWindow.filter(([t]) => t > cutoff);
+    $('sRate').textContent = (state.msgWindow.length / 5).toFixed(1);
+    $('sPoints').textContent = Math.round(state.ptsWindow.reduce((s, [, n]) => s + n, 0) / 5);
+  }, 1000);
+
+  const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+})();
+</script>
+</body>
+</html>
